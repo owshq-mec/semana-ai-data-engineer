@@ -1,0 +1,39 @@
+analysis_task:
+  description: >
+    Answer the business question using SQL queries against the ShopAgent Postgres
+    database: "{question}". Steps: identify tables needed (customers, products, orders),
+    write and execute SQL via the supabase_execute_sql tool, interpret results with
+    labels and units (R$, %, count). If multiple queries needed, execute sequentially.
+  expected_output: >
+    Structured summary of SQL results with exact numbers, labels, and relevant
+    breakdowns (by state, segment, category, or payment method). Include SQL queries used.
+  agent: analyst
+
+research_task:
+  description: >
+    Research customer sentiment and review themes related to: "{question}". Steps:
+    extract key semantic concepts, run 2-3 semantic searches in Qdrant covering
+    different angles, identify recurring themes/complaints/positive signals, note
+    sentiment distribution.
+  expected_output: >
+    Thematic summary of customer feedback by topic. Include direct review quotes
+    (Portuguese), sentiment labels, frequency of recurring complaints or praise.
+    Minimum 3 themes.
+  agent: researcher
+
+report_task:
+  description: >
+    Generate comprehensive executive report answering: "{question}". You have access
+    to analyst SQL metrics and researcher sentiment findings. Structure:
+    1) Resumo Executivo (2-3 sentences),
+    2) Metricas Principais (exact figures from analyst),
+    3) Voz do Cliente (review excerpts from researcher),
+    4) Recomendacoes (3-5 prioritized actions).
+  expected_output: >
+    Polished executive report in Portuguese combining quantitative metrics and
+    qualitative insights. Recommendations must reference specific data points from
+    both analyst and researcher.
+  agent: reporter
+  context:
+    - analysis_task
+    - research_task

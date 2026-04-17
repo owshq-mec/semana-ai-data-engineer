@@ -1,78 +1,21 @@
-"""ShopAgent Day 4 — CrewAI tool wrappers for The Ledger and The Memory."""
+"""ShopAgent Day 4 — CrewAI tools for The Ledger (SQL) and The Memory (semantic)."""
 
-import json
 import os
 from pathlib import Path
 
 import psycopg2
-import qdrant_client
 from crewai.tools import tool
 from dotenv import load_dotenv
-from llama_index.core import Settings, VectorStoreIndex
-from llama_index.embeddings.fastembed import FastEmbedEmbedding
-from llama_index.llms.anthropic import Anthropic
-from llama_index.vector_stores.qdrant import QdrantVectorStore
+from fastembed import TextEmbedding
+from qdrant_client import QdrantClient
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
-SAFE_QUERIES: dict[str, str] = {
-    "revenue_by_state": """
-        SELECT c.state, COUNT(o.order_id) AS pedidos, SUM(o.total) AS faturamento
-        FROM orders o JOIN customers c ON o.customer_id = c.customer_id
-        GROUP BY c.state ORDER BY faturamento DESC
-    """,
-    "orders_by_status": """
-        SELECT status, COUNT(*) AS total, SUM(total) AS faturamento,
-               ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER(), 1) AS pct
-        FROM orders GROUP BY status ORDER BY total DESC
-    """,
-    "top_products": """
-        SELECT p.name, p.category, p.brand,
-               COUNT(o.order_id) AS pedidos, SUM(o.total) AS faturamento
-        FROM orders o JOIN products p ON o.product_id = p.product_id
-        GROUP BY p.product_id, p.name, p.category, p.brand
-        ORDER BY faturamento DESC LIMIT 10
-    """,
-    "payment_distribution": """
-        SELECT payment, COUNT(*) AS total,
-               ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER(), 1) AS pct
-        FROM orders GROUP BY payment ORDER BY total DESC
-    """,
-    "segment_analysis": """
-        SELECT c.segment, COUNT(DISTINCT c.customer_id) AS clientes,
-               COUNT(o.order_id) AS pedidos, ROUND(AVG(o.total), 2) AS ticket_medio
-        FROM customers c LEFT JOIN orders o ON c.customer_id = o.customer_id
-        GROUP BY c.segment ORDER BY ticket_medio DESC
-    """,
-    "revenue_by_category": """
-        SELECT p.category, COUNT(o.order_id) AS pedidos, SUM(o.total) AS faturamento,
-               ROUND(AVG(o.total), 2) AS ticket_medio
-        FROM orders o JOIN products p ON o.product_id = p.product_id
-        GROUP BY p.category ORDER BY faturamento DESC
-    """,
-    "customer_count_by_state": """
-        SELECT state, COUNT(*) AS clientes
-        FROM customers GROUP BY state ORDER BY clientes DESC
-    """,
-    "orders_by_month": """
-        SELECT TO_CHAR(created_at, 'YYYY-MM') AS mes, COUNT(*) AS pedidos,
-               SUM(total) AS faturamento
-        FROM orders GROUP BY mes ORDER BY mes DESC LIMIT 12
-    """,
-    "satisfaction_by_region": """
-        SELECT c.state, c.segment, COUNT(o.order_id) AS pedidos,
-               SUM(o.total) AS faturamento, ROUND(AVG(o.total), 2) AS ticket_medio
-        FROM orders o JOIN customers c ON o.customer_id = c.customer_id
-        GROUP BY c.state, c.segment ORDER BY c.state, faturamento DESC
-    """,
-}
+_embedding_model = None
 
 
 def _get_postgres_connection():
-    supabase_url = os.environ.get("SUPABASE_URL")
-    if supabase_url:
-        return psycopg2.connect(supabase_url)
     return psycopg2.connect(
         host=os.environ.get("POSTGRES_HOST", "localhost"),
         port=int(os.environ.get("POSTGRES_PORT", 5432)),
@@ -82,142 +25,66 @@ def _get_postgres_connection():
     )
 
 
-_llama_settings_initialized = False
+def _get_embedding_model() -> TextEmbedding:
+    global _embedding_model
+    if _embedding_model is None:
+        _embedding_model = TextEmbedding(model_name="BAAI/bge-base-en-v1.5")
+    return _embedding_model
 
 
-def _configure_llama_settings() -> None:
-    global _llama_settings_initialized
-    if _llama_settings_initialized:
-        return
-    Settings.llm = Anthropic(model="claude-sonnet-4-20250514")
-    Settings.embed_model = FastEmbedEmbedding(model_name="BAAI/bge-base-en-v1.5")
-    _llama_settings_initialized = True
-
-
-def _get_qdrant_url() -> str:
-    return os.environ.get(
-        "QDRANT_CLOUD_URL",
-        os.environ.get("QDRANT_URL", "http://localhost:6333"),
-    )
-
-
-def _get_qdrant_api_key() -> str | None:
-    return os.environ.get("QDRANT_CLOUD_API_KEY")
-
-
-@tool("Supabase SQL Executor")
+@tool("supabase_execute_sql")
 def supabase_execute_sql(query: str) -> str:
-    """Execute a predefined SQL query against Supabase Postgres for EXACT data.
-
-    Use when the question asks for specific numbers, totals, or structured data:
-    - Faturamento (revenue) by state, category, or period
-    - Total de pedidos (order counts), ticket medio (average order value)
-    - Payment method distribution, customer segment analysis
-    - Any question requiring aggregation, GROUP BY, or JOINs
-
-    The query parameter must be one of the predefined safe query names:
-    revenue_by_state, orders_by_status, top_products, payment_distribution,
-    segment_analysis, revenue_by_category, customer_count_by_state,
-    orders_by_month, satisfaction_by_region.
-
-    Args:
-        query: Name of a predefined safe query to execute against the shopagent database.
-    """
-    query_key = query.strip().lower().replace(" ", "_").replace("-", "_")
-
-    sql = SAFE_QUERIES.get(query_key)
-    if sql is None:
-        available = ", ".join(sorted(SAFE_QUERIES.keys()))
-        return (
-            f"Unknown query '{query}'. "
-            f"Available predefined queries: {available}. "
-            f"Pass one of these names as the query parameter."
-        )
-
-    try:
-        conn = _get_postgres_connection()
-    except (psycopg2.OperationalError, ValueError) as exc:
-        return f"Database connection failed: {exc}"
-
+    """Execute a SQL query against the ShopAgent Postgres database (The Ledger).
+    Use for exact metrics: revenue, order counts, averages, customer segments.
+    Available tables: customers, products, orders.
+    Always write SELECT queries. Never mutate data."""
+    conn = _get_postgres_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(sql)
+            cur.execute(query)
             columns = [desc[0] for desc in cur.description]
             rows = cur.fetchall()
-
-        results = []
+        lines = [" | ".join(columns)]
         for row in rows:
-            record = {}
-            for col, val in zip(columns, row):
-                if hasattr(val, "__float__"):
-                    record[col] = float(val)
-                else:
-                    record[col] = str(val) if val is not None else None
-            results.append(record)
-
-        return json.dumps(results, ensure_ascii=False, indent=2)
-    except psycopg2.Error as exc:
-        return f"Query execution failed: {exc}"
+            lines.append(" | ".join(str(v) for v in row))
+        return "\n".join(lines)
+    except Exception as e:
+        return f"SQL Error: {e}"
     finally:
         conn.close()
 
 
-@tool("Qdrant Semantic Search")
+@tool("qdrant_semantic_search")
 def qdrant_semantic_search(question: str) -> str:
-    """Search customer reviews by MEANING using Qdrant vector database.
+    """Search customer reviews by meaning using Qdrant vector database (The Memory).
+    Use for opinions, complaints, sentiment themes, and customer feedback.
+    The collection contains 203 Portuguese reviews with rating, comment, sentiment."""
+    qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    qdrant_api_key = os.environ.get("QDRANT_API_KEY", None)
+    collection = os.environ.get("QDRANT_COLLECTION", "shopagent_reviews")
 
-    Use when the question asks about opinions, complaints, or text patterns:
-    - Reclamacoes (complaints) about delivery, quality, price
-    - Customer sentiment analysis (positive, negative, neutral)
-    - Product feedback themes and review patterns
-    - Any question about what customers SAY, THINK, or FEEL
+    model = _get_embedding_model()
+    embeddings = list(model.embed([question]))
+    query_vector = embeddings[0].tolist()
 
-    Args:
-        question: Natural language question for semantic similarity search in reviews.
-    """
-    _configure_llama_settings()
+    client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+    results = client.query_points(
+        collection_name=collection,
+        query=query_vector,
+        limit=5,
+        with_payload=True,
+    )
 
-    qdrant_url = _get_qdrant_url()
-    api_key = _get_qdrant_api_key()
-    collection_name = os.environ.get("QDRANT_COLLECTION", "shopagent_reviews")
+    if not results.points:
+        return "Nenhum review encontrado para esta consulta."
 
-    try:
-        client_kwargs: dict = {"url": qdrant_url}
-        if api_key:
-            client_kwargs["api_key"] = api_key
-        client = qdrant_client.QdrantClient(**client_kwargs)
+    lines: list[str] = []
+    for point in results.points:
+        payload = point.payload or {}
+        rating = payload.get("rating", "?")
+        sentiment = payload.get("sentiment", "unknown")
+        comment = payload.get("comment", "")[:200]
+        score = round(point.score, 3)
+        lines.append(f"[score={score} | rating={rating} | {sentiment}] {comment}")
 
-        vector_store = QdrantVectorStore(client=client, collection_name=collection_name)
-        index = VectorStoreIndex.from_vector_store(vector_store)
-        engine = index.as_query_engine(similarity_top_k=5)
-        response = engine.query(question)
-
-        sources = []
-        for node in response.source_nodes:
-            sources.append({
-                "score": round(node.score, 3),
-                "text": node.text[:200],
-            })
-
-        result = {
-            "answer": str(response.response),
-            "sources": sources,
-            "total_sources": len(response.source_nodes),
-        }
-
-        return json.dumps(result, ensure_ascii=False, indent=2)
-    except Exception as exc:
-        return f"Qdrant search failed: {exc}"
-
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("  Testing supabase_execute_sql")
-    print("=" * 60)
-    print(supabase_execute_sql.run("revenue_by_state"))
-
-    print()
-    print("=" * 60)
-    print("  Testing qdrant_semantic_search")
-    print("=" * 60)
-    print(qdrant_semantic_search.run("Clientes reclamando de entrega atrasada"))
+    return "\n".join(lines)
