@@ -1,0 +1,26 @@
+{
+  "name": "shopagent-commerce",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agentic Commerce storefront — Editorial Concept Store powered by the ShopAgent crew.",
+  "scripts": {
+    "dev": "next dev -p 3200",
+    "build": "next build",
+    "start": "next start -p 3200",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "motion": "11.15.0",
+    "next": "15.1.3",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/react": "19.0.2",
+    "@types/react-dom": "19.0.2",
+    "typescript": "5.7.2"
+  }
+}
