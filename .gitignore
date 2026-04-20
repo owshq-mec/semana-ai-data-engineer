@@ -24,3 +24,11 @@ Thumbs.db
 # Data (generated at runtime)
 *.jsonl
 !gen/data/reviews/reviews.jsonl
+
+presentation/node_modules/
+
+presentation/html-to-pdf.mjs
+
+presentation/package-lock.json
+
+presentation/package.json
